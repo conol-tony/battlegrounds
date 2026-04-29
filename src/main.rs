@@ -1,335 +1,173 @@
 use bevy::prelude::*;
 use rand::prelude::*;
+use rand::rngs::StdRng;
+use bevy::window::WindowResolution;
 
-// ============ 游戏常量 ============
-
-const CARD_WIDTH: f32 = 100.0;
-const CARD_HEIGHT: f32 = 140.0;
-const BOARD_Y: f32 = -150.0;
-const ENEMY_BOARD_Y: f32 = 200.0;
-const SHOP_Y: f32 = -100.0;
+const CARD_W: f32 = 80.0;
+const CARD_H: f32 = 130.0;
+const SHOP_Y: f32 = -280.0;
+const BOARD_Y: f32 = -100.0;
+const ENEMY_BOARD_Y: f32 = 100.0;
 const MAX_GOLD: i32 = 10;
-const MAX_BOARD_SIZE: usize = 7;
+const MAX_BOARD: usize = 7;
 const SHOP_SIZE: usize = 4;
-
-// ============ 游戏状态 ============
-
-#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-enum GameState {
-    #[default]
-    Shop,
-    Battle,
-    GameOver,
-}
-
-// ============ 组件 ============
 
 #[derive(Component, Clone, Debug)]
 struct Minion {
     name: String,
     attack: i32,
     health: i32,
-    max_health: i32,
     tier: i32,
-    minion_type: MinionType,
+    race: Race,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum MinionType {
-    Beast,
-    Mech,
-    Demon,
-    Dragon,
-    Pirate,
-    Elemental,
-    Neutral,
+#[derive(Component, Clone, Debug, PartialEq)]
+enum Race {
+    Beast, Demon, Dragon, Elemental, Mech, Murloc, Undead, Quilboar, Pirate, Neutral,
 }
 
-#[derive(Component)]
-struct Player {
-    gold: i32,
-    tier: i32,
-    health: i32,
+impl Race {
+    fn icon(&self) -> &'static str {
+        match self {
+            Race::Beast     => "🐾",
+            Race::Demon     => "😈",
+            Race::Dragon    => "🐉",
+            Race::Elemental => "🌊",
+            Race::Mech      => "🤖",
+            Race::Murloc    => "🐸",
+            Race::Undead    => "💀",
+            Race::Quilboar  => "🐗",
+            Race::Pirate    => "🏴",
+            Race::Neutral   => "⚪",
+        }
+    }
 }
 
-#[derive(Component)]
-struct Enemy {
-    health: i32,
-    tier: i32,
-}
+#[derive(Component)] struct ShopSlot(usize);
+#[derive(Component)] struct BoardSlot(usize);
+#[derive(Component)] struct InShop;
+#[derive(Component)] struct OnBoard;
+#[derive(Component)] struct UiLabel;
+#[derive(Component)] struct Player { gold: i32, tier: i32, health: i32 }
+#[derive(Component)] struct Enemy  { health: i32, tier: i32 }
+#[derive(Component)] struct BattleTimer { timer: Timer, resolved: bool }
+#[derive(Resource)] struct FontHandle(Handle<Font>);
+#[derive(States, Clone, Eq, PartialEq, Hash, Debug, Default)]
+enum GameState { #[default] Shop, Battle, GameOver }
 
-#[derive(Component)]
-struct InShop;
+#[derive(Message)] struct BuyMinion(usize);
+#[derive(Message)] struct SellMinion(Entity);
+#[derive(Message)] struct RefreshShop;
+#[derive(Message)] struct EndTurn;
 
-#[derive(Component)]
-struct OnBoard;
-
-#[derive(Component, Clone, Copy)]
-struct BoardSlot(usize);
-
-#[derive(Component)]
-struct ShopSlot(usize);
-
-#[derive(Component)]
-struct BattleTimer {
-    timer: Timer,
-    resolved: bool,
-}
-
-#[derive(Component)]
-struct MainCamera;
-
-#[derive(Component)]
-struct UiLabel;
-
-// ============ 资源 ============
-
-#[derive(Resource)]
-struct GameData {
-    all_minions: Vec<MinionTemplate>,
-}
-
-#[derive(Clone)]
-struct MinionTemplate {
-    name: String,
-    attack: i32,
-    health: i32,
-    tier: i32,
-    minion_type: MinionType,
-}
-
-// ============ 消息 ============
-
-#[derive(Message)]
-struct StartBattle;
-
-#[derive(Message)]
-struct EndBattle(bool);
-
-#[derive(Message)]
-struct BuyMinion(usize);
-
-#[derive(Message)]
-struct SellMinion(Entity);
-
-#[derive(Message)]
-struct RefreshShop;
-
-#[derive(Message)]
-struct NextTurn;
+struct MinionTemplate { name: String, attack: i32, health: i32, tier: i32, race: Race }
+#[derive(Resource)] struct GameData { minions: Vec<MinionTemplate>, rng: StdRng }
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "炉石传说：酒馆战棋".into(),
+                resolution: WindowResolution::new(800, 800),
+                ..default()
+            }),
+            ..default()
+        }))
         .init_state::<GameState>()
-        .add_message::<StartBattle>()
-        .add_message::<EndBattle>()
         .add_message::<BuyMinion>()
         .add_message::<SellMinion>()
         .add_message::<RefreshShop>()
-        .add_message::<NextTurn>()
-        .insert_resource(GameData::new())
+        .add_message::<EndTurn>()
         .add_systems(Startup, setup)
-        .add_systems(OnEnter(GameState::Shop), enter_shop)
-        .add_systems(
-            Update,
-            (
-                handle_input,
-                handle_messages,
-                handle_shop_ui,
-            )
-                .run_if(in_state(GameState::Shop)),
-        )
-        .add_systems(
-            Update,
-            run_battle.run_if(in_state(GameState::Battle)),
-        )
-        .add_systems(
-            Update,
-            game_over_ui.run_if(in_state(GameState::GameOver)),
-        )
+        .add_systems(Update, (
+            handle_input, handle_messages, update_shop_ui,
+        ).run_if(in_state(GameState::Shop)))
+        .add_systems(Update, run_battle.run_if(in_state(GameState::Battle)))
+        .add_systems(Update, game_over_ui.run_if(in_state(GameState::GameOver)))
         .run();
 }
 
-// ============ 系统 ============
-
-fn setup(mut commands: Commands) {
-    commands.spawn((Camera2d, MainCamera));
-
-    commands.spawn((
-        Player {
-            gold: 3,
-            tier: 1,
-            health: 40,
-        },
-        Name::new("Player"),
-    ));
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.spawn(Camera2d);
+    let font = asset_server.load("fonts/zh_font.ttf");
+    commands.insert_resource(FontHandle(font.clone()));
+    let ff = |s: f32| TextFont { font: font.clone(), font_size: s, ..default() };
 
     commands.spawn((
-        Enemy {
-            health: 40,
-            tier: 1,
-        },
-        Name::new("Enemy"),
+        Sprite { color: Color::srgb(0.08, 0.08, 0.12), custom_size: Some(Vec2::new(800., 800.)), ..default() },
+        Transform::from_xyz(0., 0., 0.),
     ));
 
-    spawn_ui(&mut commands);
-}
+    commands.spawn((Player { gold: 3, tier: 1, health: 40 }, Name::new("player")));
+    commands.spawn((Enemy  { health: 40, tier: 1 }, Name::new("enemy")));
 
-fn spawn_ui(commands: &mut Commands) {
-    // 标题
-    commands.spawn((
-        Text2d::new("🏰 酒馆战棋 Demo (Bevy 0.18)"),
-        TextFont {
-            font_size: 24.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        Transform::from_xyz(0.0, 345.0, 10.0),
-        UiLabel,
-    ));
+    // player info (x=-300, y=355)
+    commands.spawn((Text2d::new(""), ff(13.), TextColor(Color::WHITE), Transform::from_xyz(-300., 355., 10.), UiLabel));
+    // enemy info (x=250, y=355)
+    commands.spawn((Text2d::new(""), ff(13.), TextColor(Color::srgb(1., 0.4, 0.4)), Transform::from_xyz(250., 355., 10.), UiLabel));
+    // game over title (x=0, y=355)
+    commands.spawn((Text2d::new(""), ff(22.), TextColor(Color::WHITE), Transform::from_xyz(0., 355., 10.), UiLabel));
+    // game over subtitle (x=0, y=320)
+    commands.spawn((Text2d::new(""), ff(14.), TextColor(Color::srgb(0.8, 0.8, 0.8)), Transform::from_xyz(0., 320., 10.), UiLabel));
+    // hint bar
+    commands.spawn((Text2d::new("按 B 购买 | S 出售选中 | R 刷新(1金) | E/空格 结束回合 | 1-7 选中随从"), ff(11.), TextColor(Color::srgb(0.6, 0.6, 0.6)), Transform::from_xyz(0., -380., 10.), UiLabel));
+    // section labels
+    commands.spawn((Text2d::new("── 商店 ──"), ff(12.), TextColor(Color::srgb(0.6, 0.6, 0.6)), Transform::from_xyz(0., -220., 10.)));
+    commands.spawn((Text2d::new("── 我方战场 ──"), ff(12.), TextColor(Color::srgb(0.4, 0.7, 1.0)), Transform::from_xyz(0., -40., 10.)));
+    commands.spawn((Text2d::new("── 敌方战场 ──"), ff(12.), TextColor(Color::srgb(1., 0.4, 0.4)), Transform::from_xyz(0., 160., 10.)));
 
-    // 帮助文本
-    commands.spawn((
-        Text2d::new("按 1-4 购买 | 按 R 刷新(1金) | 按 空格 结束回合 | 点击己方随从出售"),
-        TextFont {
-            font_size: 12.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.6, 0.6, 0.6)),
-        Transform::from_xyz(0.0, 312.0, 10.0),
-        UiLabel,
-    ));
+    // divider
+    commands.spawn((Sprite { color: Color::srgb(0.3, 0.3, 0.3), custom_size: Some(Vec2::new(780., 1.)), ..default() }, Transform::from_xyz(0., -245., 2.)));
 
-    // 玩家状态
-    commands.spawn((
-        Text2d::new(""),
-        TextFont {
-            font_size: 14.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.3, 0.9, 0.3)),
-        Transform::from_xyz(-300.0, 345.0, 10.0),
-        UiLabel,
-    ));
-
-    // 敌人状态
-    commands.spawn((
-        Text2d::new(""),
-        TextFont {
-            font_size: 14.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.9, 0.3, 0.3)),
-        Transform::from_xyz(250.0, 345.0, 10.0),
-        UiLabel,
-    ));
-
-    // 提示信息
-    commands.spawn((
-        Text2d::new(""),
-        TextFont {
-            font_size: 14.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.9, 0.9, 0.3)),
-        Transform::from_xyz(0.0, -350.0, 10.0),
-        UiLabel,
-    ));
-}
-
-fn enter_shop(mut commands: Commands, mut game_data: ResMut<GameData>) {
-    game_data.refresh_shop(&mut commands, 1);
+    let mut gd = GameData::new();
+    gd.refresh_shop(&mut commands, 1);
+    commands.insert_resource(gd);
 }
 
 fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-    mut mw_buy: MessageWriter<BuyMinion>,
-    mut mw_refresh: MessageWriter<RefreshShop>,
-    mut mw_next: MessageWriter<NextTurn>,
-    q_board_minions: Query<(Entity, &Transform, &Minion), (With<OnBoard>, Without<InShop>)>,
-    mut mw_sell: MessageWriter<SellMinion>,
+    mut sel: Local<Option<Entity>>,
+    q_board: Query<(Entity, &BoardSlot), With<OnBoard>>,
+    mut ew_buy: MessageWriter<BuyMinion>,
+    mut ew_sell: MessageWriter<SellMinion>,
+    mut ew_refresh: MessageWriter<RefreshShop>,
+    mut ew_end: MessageWriter<EndTurn>,
+    q_shop: Query<&ShopSlot, With<InShop>>,
 ) {
-    if keys.just_pressed(KeyCode::Space) {
-        mw_next.write(NextTurn);
+    for (i, k) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
+                   KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7]
+        .iter().enumerate()
+    {
+        if keys.just_pressed(*k) { *sel = q_board.iter().find(|(_, s)| s.0 == i).map(|(e, _)| e); }
     }
-
-    if keys.just_pressed(KeyCode::KeyR) {
-        mw_refresh.write(RefreshShop);
+    if keys.just_pressed(KeyCode::KeyB) {
+        if let Some(s) = q_shop.iter().next() { ew_buy.write(BuyMinion(s.0)); }
     }
-
-    if keys.just_pressed(KeyCode::Digit1) {
-        mw_buy.write(BuyMinion(0));
+    if keys.just_pressed(KeyCode::KeyS) {
+        if let Some(e) = *sel { ew_sell.write(SellMinion(e)); *sel = None; }
     }
-    if keys.just_pressed(KeyCode::Digit2) {
-        mw_buy.write(BuyMinion(1));
-    }
-    if keys.just_pressed(KeyCode::Digit3) {
-        mw_buy.write(BuyMinion(2));
-    }
-    if keys.just_pressed(KeyCode::Digit4) {
-        mw_buy.write(BuyMinion(3));
-    }
-
-    // 点击出售
-    if mouse.just_pressed(MouseButton::Left) {
-        if let Ok((cam, cam_transform)) = cameras.single() {
-            if let Ok(window) = windows.single() {
-                if let Some(pos) = window.cursor_position() {
-                    let window_size = window.size();
-                    if let Ok(world_pos) = screen_to_world(cam, cam_transform, pos, window_size) {
-                        for (entity, transform, _minion) in q_board_minions.iter() {
-                            let dx = (transform.translation.x - world_pos.x).abs();
-                            let dy = (transform.translation.y - world_pos.y).abs();
-                            if dx < CARD_WIDTH / 2.0 && dy < CARD_HEIGHT / 2.0 {
-                                mw_sell.write(SellMinion(entity));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    if keys.just_pressed(KeyCode::KeyR) { ew_refresh.write(RefreshShop); }
+    if keys.just_pressed(KeyCode::Space) || keys.just_pressed(KeyCode::KeyE) { ew_end.write(EndTurn); }
 }
 
-fn screen_to_world(
-    cam: &Camera,
-    cam_transform: &GlobalTransform,
-    screen_pos: Vec2,
-    window_size: Vec2,
-) -> Result<Vec2, bevy::camera::ViewportConversionError> {
-    let ndc = (screen_pos / window_size) * 2.0 - Vec2::ONE;
-    cam.viewport_to_world_2d(cam_transform, ndc)
-}
-
-fn handle_shop_ui(
+fn update_shop_ui(
     player: Query<&Player>,
     enemy: Query<&Enemy>,
-    board_minions: Query<(Entity, &Minion, &BoardSlot), (With<OnBoard>, Without<InShop>)>,
-    mut ui_texts: Query<(&mut Text2d, &Transform, &UiLabel)>,
+    q_board: Query<&BoardSlot, With<OnBoard>>,
+    mut ui: Query<(&mut Text2d, &Transform, &UiLabel)>,
+    font: Res<FontHandle>,
 ) {
     let Ok(player) = player.single() else { return };
     let Ok(enemy) = enemy.single() else { return };
-
-    let board_count = board_minions.iter().count();
-
-    // 更新商店阶段 UI (只在 shop 状态运行)
-    for (mut text, transform, _label) in ui_texts.iter_mut() {
-        if (transform.translation.x - (-300.0)).abs() < 5.0
-            && (transform.translation.y - 345.0).abs() < 5.0
-        {
-            text.0 = format!(
-                "💛HP:{} | 👑T{} | 💰{}/{} | 📦{}/{}",
-                player.health, player.tier, player.gold, MAX_GOLD, board_count, MAX_BOARD_SIZE
-            );
+    let bn = q_board.iter().filter(|s| s.0 < 100).count();
+    let _ff = |s: f32| TextFont { font: font.0.clone(), font_size: s, ..default() };
+    for (mut t, tr, _) in ui.iter_mut() {
+        let (tx, ty) = (tr.translation.x, tr.translation.y);
+        if (tx + 300.).abs() < 5. && (ty - 355.).abs() < 5. {
+            t.0 = format!("💛HP:{}  👑T{}  💰{}/{}  📦{}/{}", player.health, player.tier, player.gold, MAX_GOLD, bn, MAX_BOARD);
         }
-        if (transform.translation.x - 250.0).abs() < 5.0
-            && (transform.translation.y - 345.0).abs() < 5.0
-        {
-            text.0 = format!("💀 HP:{} | T{}", enemy.health, enemy.tier);
+        if (tx - 250.).abs() < 5. && (ty - 355.).abs() < 5. {
+            t.0 = format!("💀HP:{}  T{}", enemy.health, enemy.tier);
         }
     }
 }
@@ -337,557 +175,298 @@ fn handle_shop_ui(
 fn handle_messages(
     mut commands: Commands,
     mut player: Query<&mut Player>,
-    mut enemy: Query<&mut Enemy>,
     mut game_data: ResMut<GameData>,
-    shop_items: Query<(Entity, &ShopSlot, &Minion), With<InShop>>,
-    board_minions: Query<(Entity, &Minion, &BoardSlot), (With<OnBoard>, Without<InShop>)>,
+    q_shop: Query<(Entity, &ShopSlot, &Minion), With<InShop>>,
+    q_board: Query<(Entity, &Minion, &BoardSlot), (With<OnBoard>, Without<InShop>)>,
     mut next_state: ResMut<NextState<GameState>>,
-    mut mr_buy: MessageReader<BuyMinion>,
-    mut mr_sell: MessageReader<SellMinion>,
-    mut mr_refresh: MessageReader<RefreshShop>,
-    mut mr_next: MessageReader<NextTurn>,
+    mut ev_buy: MessageReader<BuyMinion>,
+    mut ev_sell: MessageReader<SellMinion>,
+    mut ev_refresh: MessageReader<RefreshShop>,
+    mut ev_end: MessageReader<EndTurn>,
+    font: Res<FontHandle>,
 ) {
     let Ok(mut player) = player.single_mut() else { return };
-    let Ok(mut enemy) = enemy.single_mut() else { return };
 
-    // 购买
-    for BuyMinion(slot) in mr_buy.read() {
-        let cost = 3;
-        if player.gold >= cost {
-            let board_count = board_minions.iter().count();
-            if board_count < MAX_BOARD_SIZE {
-                let shop_minion = shop_items
-                    .iter()
-                    .find(|(_, s, _)| s.0 == *slot)
-                    .map(|(e, _, m)| (e, m.clone()));
-
-                if let Some((shop_entity, minion)) = shop_minion {
-                    commands.entity(shop_entity).despawn();
-
-                    let used_slots: Vec<usize> =
-                        board_minions.iter().map(|(_, _, s)| s.0).collect();
-                    let free_slot = (0..MAX_BOARD_SIZE).find(|i| !used_slots.contains(i));
-
-                    if let Some(slot_idx) = free_slot {
-                        player.gold -= cost;
-                        spawn_minion_card(&mut commands, &minion, slot_idx, false);
-                    }
-                }
+    // buy
+    for BuyMinion(slot) in ev_buy.read() {
+        if player.gold < 3 || q_board.iter().count() >= MAX_BOARD { continue; }
+        if let Some((se, m)) = q_shop.iter().find(|(_, s, _)| s.0 == *slot).map(|(e, _, m)| (e, m.clone())) {
+            commands.entity(se).despawn();
+            let used: Vec<usize> = q_board.iter().map(|(_, _, s)| s.0).collect();
+            if let Some(i) = (0..MAX_BOARD).find(|i| !used.contains(i)) {
+                player.gold -= 3;
+                spawn_card(&mut commands, &m, i, false, &font.0);
             }
         }
     }
 
-    // 出售
-    for SellMinion(entity) in mr_sell.read() {
-        if let Ok((_, minion, slot)) = board_minions.get(*entity) {
-            if slot.0 < 100 {
-                let refund = minion.tier;
-                player.gold = (player.gold + refund).min(MAX_GOLD);
-                commands.entity(*entity).despawn();
+    // sell
+    for SellMinion(e) in ev_sell.read() {
+        if let Ok((_, m, s)) = q_board.get(*e) {
+            if s.0 < 100 {
+                player.gold = (player.gold + m.tier).min(MAX_GOLD);
+                commands.entity(*e).despawn();
             }
         }
     }
 
-    // 刷新
-    for _ in mr_refresh.read() {
+    // refresh
+    for _ in ev_refresh.read() {
         if player.gold >= 1 {
             player.gold -= 1;
-            for (entity, _, _) in shop_items.iter() {
-                commands.entity(entity).despawn();
-            }
+            for (e, _, _) in q_shop.iter() { commands.entity(e).despawn(); }
             game_data.refresh_shop(&mut commands, player.tier);
         }
     }
 
-    // 下一回合 -> 战斗
-    for _ in mr_next.read() {
-        let board_count = board_minions.iter().count();
-        if board_count > 0 {
-            // 清除商店
-            for (entity, _, _) in shop_items.iter() {
-                commands.entity(entity).despawn();
-            }
-            // 生成敌方
-            game_data.spawn_enemy_board(&mut commands, player.tier);
-
-            next_state.set(GameState::Battle);
-
-            commands.spawn((
-                BattleTimer {
-                    timer: Timer::from_seconds(0.6, TimerMode::Once),
-                    resolved: false,
-                },
-                Name::new("BattleTimer"),
-            ));
-        }
+    // end turn
+    for _ in ev_end.read() {
+        if q_board.iter().filter(|(_, _, s)| s.0 < 100).count() == 0 { continue; }
+        for (e, _, _) in q_shop.iter() { commands.entity(e).despawn(); }
+        game_data.spawn_enemy(&mut commands, player.tier, &font.0);
+        next_state.set(GameState::Battle);
+        commands.spawn((BattleTimer { timer: Timer::from_seconds(0.6, TimerMode::Once), resolved: false }, Name::new("bt")));
     }
 }
 
 fn run_battle(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut timer_query: Query<(Entity, &mut BattleTimer)>,
-    player_minions: Query<(Entity, &Minion, &BoardSlot), (With<OnBoard>, Without<InShop>)>,
-    mut mw_end: MessageWriter<EndBattle>,
+    mut commands: Commands, time: Res<Time>,
+    mut qt: Query<(Entity, &mut BattleTimer)>,
+    qm: Query<(Entity, &Minion, &BoardSlot), With<OnBoard>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut player: Query<&mut Player>,
     mut enemy: Query<&mut Enemy>,
 ) {
-    let Ok((timer_entity, mut battle_timer)) = timer_query.single_mut() else {
-        return;
-    };
+    let Ok((te, mut bt)) = qt.single_mut() else { return };
+    if bt.resolved { return; }
+    bt.timer.tick(time.delta());
+    if !bt.timer.just_finished() { return; }
+    bt.resolved = true;
 
-    if battle_timer.resolved {
-        return;
+    let (mut pp, mut ep): (i32, i32) = (0, 0);
+    for (_, m, s) in qm.iter() {
+        if s.0 < 100 { pp += m.attack + m.health; } else { ep += m.attack + m.health; }
     }
+    let won = pp >= ep;
 
-    battle_timer.timer.tick(time.delta());
+    let Ok(mut p) = player.single_mut() else { return };
+    let Ok(mut e) = enemy.single_mut() else { return };
+    let pc = qm.iter().filter(|(_, _, s)| s.0 < 100).count() as i32;
+    let ec = qm.iter().filter(|(_, _, s)| s.0 >= 100).count() as i32;
+    if won { e.health -= p.tier + pc; } else { p.health -= e.tier + ec; }
 
-    if battle_timer.timer.just_finished() {
-        battle_timer.resolved = true;
+    for (eid, _, s) in qm.iter() { if s.0 >= 100 { commands.entity(eid).despawn(); } }
+    commands.entity(te).despawn();
 
-        // 计算战斗力
-        let mut player_power: i32 = 0;
-        let mut enemy_power: i32 = 0;
-
-        for (_entity, minion, slot) in player_minions.iter() {
-            if slot.0 < 100 {
-                player_power += minion.attack + minion.health;
-            } else {
-                enemy_power += minion.attack + minion.health;
-            }
-        }
-
-        let player_won = player_power >= enemy_power;
-        let board_count = player_minions
-            .iter()
-            .filter(|(_, _, s)| s.0 < 100)
-            .count() as i32;
-
-        // 结算伤害
-        let Ok(mut p) = player.single_mut() else { return };
-        let Ok(mut e) = enemy.single_mut() else { return };
-
-        if player_won {
-            let damage = p.tier + board_count;
-            e.health -= damage;
-        } else {
-            let enemy_board_count = player_minions
-                .iter()
-                .filter(|(_, _, s)| s.0 >= 100)
-                .count() as i32;
-            let damage = e.tier + enemy_board_count;
-            p.health -= damage;
-        }
-
-        // 清除敌方
-        let enemy_entities: Vec<Entity> = player_minions
-            .iter()
-            .filter(|(_, _, s)| s.0 >= 100)
-            .map(|(e, _, _)| e)
-            .collect();
-        for e in &enemy_entities {
-            commands.entity(*e).despawn();
-        }
-
-        commands.entity(timer_entity).despawn();
-
-        // 检查游戏结束
-        if p.health <= 0 || e.health <= 0 {
-            next_state.set(GameState::GameOver);
-        } else {
-            // 回到商店阶段
-            p.gold = MAX_GOLD;
-            next_state.set(GameState::Shop);
-        }
+    if p.health <= 0 || e.health <= 0 {
+        next_state.set(GameState::GameOver);
+    } else {
+        p.gold = MAX_GOLD;
+        next_state.set(GameState::Shop);
     }
 }
 
 fn game_over_ui(
-    player: Query<&Player>,
-    enemy: Query<&Enemy>,
-    mut ui_texts: Query<(&mut Text2d, &Transform, &UiLabel)>,
+    mut player: Query<&mut Player>,
+    mut enemy: Query<&mut Enemy>,
+    mut ui: Query<(&mut Text2d, &Transform, &UiLabel)>,
     keys: Res<ButtonInput<KeyCode>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut commands: Commands,
-    game_data: ResMut<GameData>,
+    mut game_data: ResMut<GameData>,
+    q_board: Query<(Entity, &BoardSlot), With<OnBoard>>,
+    font: Res<FontHandle>,
 ) {
-    let Ok(player) = player.single() else { return };
-    let Ok(enemy) = enemy.single() else { return };
+    let Ok(player_ref) = player.single() else { return };
+    let Ok(enemy_ref) = enemy.single() else { return };
+    let ph = player_ref.health;
+    let eh = enemy_ref.health;
+    let _ff = |s: f32| TextFont { font: font.0.clone(), font_size: s, ..default() };
 
-    for (mut text, transform, _label) in ui_texts.iter_mut() {
-        if (transform.translation.x - 0.0).abs() < 5.0
-            && (transform.translation.y - 345.0).abs() < 5.0
-        {
-            if player.health <= 0 {
-                text.0 = format!(
-                    "💀 你输了! 你的HP:{} 敌方HP:{} | 按 R 重新开始 | ESC 退出",
-                    player.health, enemy.health
-                );
+    for (mut t, tr, _) in ui.iter_mut() {
+        let (tx, ty) = (tr.translation.x, tr.translation.y);
+        if tx.abs() < 5. && (ty - 355.).abs() < 5. {
+            t.0 = if ph <= 0 {
+                format!("💀 你输了! 你的HP:{} 敌方HP:{}", ph, eh)
             } else {
-                text.0 = format!(
-                    "🏆 你赢了! 你的HP:{} 敌方HP:{} | 按 R 重新开始 | ESC 退出",
-                    player.health, enemy.health
-                );
-            }
+                format!("🏆 你赢了! 你的HP:{} 敌方HP:{}", ph, eh)
+            };
         }
-        // 清除提示
-        if (transform.translation.y - (-350.0)).abs() < 5.0 {
-            text.0 = "".to_string();
+        if tx.abs() < 5. && (ty - 320.).abs() < 5. {
+            t.0 = "按 R 重新开始 | 按 ESC 退出".to_string();
         }
     }
 
     if keys.just_pressed(KeyCode::KeyR) {
-        restart_game(&mut commands, &mut next_state);
+        for (eid, _) in q_board.iter() { commands.entity(eid).despawn(); }
+        if let Ok(mut p) = player.single_mut() { *p = Player { gold: 3, tier: 1, health: 40 }; }
+        if let Ok(mut e) = enemy.single_mut() { *e = Enemy { health: 40, tier: 1 }; }
+        game_data.refresh_shop(&mut commands, 1);
+        next_state.set(GameState::Shop);
     }
+    if keys.just_pressed(KeyCode::Escape) { std::process::exit(0); }
 }
 
-fn restart_game(commands: &mut Commands, next_state: &mut NextState<GameState>) {
-    // Simple approach: just despawn all game entities and recreate
-    // We use a two-step approach: tag entities then despawn
-    commands.queue(move |world: &mut World| {
-        let to_despawn: Vec<Entity> = world
-            .query::<Entity>()
-            .iter(world)
-            .filter(|&e| {
-                world.get::<Player>(e).is_some()
-                    || world.get::<Enemy>(e).is_some()
-                    || world.get::<OnBoard>(e).is_some()
-                    || world.get::<InShop>(e).is_some()
-                    || world.get::<BattleTimer>(e).is_some()
-            })
-            .collect();
-        for e in to_despawn {
-            world.despawn(e);
-        }
+fn spawn_card(commands: &mut Commands, m: &Minion, i: usize, enemy: bool, font: &Handle<Font>) -> Entity {
+    let slot = if enemy { 100 + i } else { i };
+    let x = -300. + i as f32 * 100.;
+    let y = if enemy { ENEMY_BOARD_Y } else { BOARD_Y };
+    let color = if enemy { Color::srgb(0.55, 0.12, 0.12) } else { Color::srgb(0.12, 0.28, 0.55) };
+    let ff = |s: f32| TextFont { font: font.clone(), font_size: s, ..default() };
 
-        world.spawn((
-            Player {
-                gold: 3,
-                tier: 1,
-                health: 40,
-            },
-            Name::new("Player"),
-        ));
-        world.spawn((
-            Enemy {
-                health: 40,
-                tier: 1,
-            },
-            Name::new("Enemy"),
-        ));
-    });
-
-    next_state.set(GameState::Shop);
+    commands.spawn((
+        Sprite { color, custom_size: Some(Vec2::new(CARD_W, CARD_H)), ..default() },
+        Transform::from_xyz(x, y, 5.), m.clone(), BoardSlot(slot), OnBoard, Name::new(format!("c_{}", m.name)),
+    ))
+    .with_children(|p| {
+        p.spawn((Text2d::new(format!("{}{}", m.race.icon(), m.name)), ff(9.), TextColor(Color::WHITE), Transform::from_xyz(0., 48., 1.)));
+        p.spawn((Text2d::new(format!("⚔{}", m.attack)), ff(12.), TextColor(Color::srgb(1., 0.9, 0.3)), Transform::from_xyz(-28., -50., 1.)));
+        p.spawn((Text2d::new(format!("❤{}", m.health)), ff(12.), TextColor(Color::srgb(1., 0.25, 0.25)), Transform::from_xyz(28., -50., 1.)));
+        p.spawn((Text2d::new(format!("⭐{}", m.tier)), ff(9.), TextColor(Color::srgb(1., 0.8, 0.3)), Transform::from_xyz(0., -63., 1.)));
+    }).id()
 }
-
-// ============ 辅助函数 ============
-
-fn spawn_minion_card(
-    commands: &mut Commands,
-    minion: &Minion,
-    slot_idx: usize,
-    is_enemy: bool,
-) -> Entity {
-    let slot = if is_enemy { 100 + slot_idx } else { slot_idx };
-    let base_x = -300.0 + slot_idx as f32 * 100.0;
-    let y = if is_enemy { ENEMY_BOARD_Y } else { BOARD_Y };
-
-    let bg_color = if is_enemy {
-        Color::srgb(0.6, 0.15, 0.15)
-    } else {
-        Color::srgb(0.15, 0.3, 0.6)
-    };
-
-    commands
-        .spawn((
-            Sprite {
-                color: bg_color,
-                custom_size: Some(Vec2::new(CARD_WIDTH, CARD_HEIGHT)),
-                ..default()
-            },
-            Transform::from_xyz(base_x, y, 5.0),
-            minion.clone(),
-            BoardSlot(slot),
-            OnBoard,
-            Name::new(format!("card_{}", minion.name)),
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text2d::new(format!("{}", minion.name)),
-                TextFont {
-                    font_size: 10.0,
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                Transform::from_xyz(0.0, 48.0, 1.0),
-            ));
-            parent.spawn((
-                Text2d::new(format!("⚔{}", minion.attack)),
-                TextFont {
-                    font_size: 13.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(1.0, 0.9, 0.3)),
-                Transform::from_xyz(-28.0, -50.0, 1.0),
-            ));
-            parent.spawn((
-                Text2d::new(format!("❤{}", minion.health)),
-                TextFont {
-                    font_size: 13.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(1.0, 0.25, 0.25)),
-                Transform::from_xyz(28.0, -50.0, 1.0),
-            ));
-            parent.spawn((
-                Text2d::new(format!("⭐{}", minion.tier)),
-                TextFont {
-                    font_size: 10.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(1.0, 0.8, 0.3)),
-                Transform::from_xyz(0.0, -63.0, 1.0),
-            ));
-        })
-        .id()
-}
-
-// ============ GameData 实现 ============
 
 impl GameData {
     fn new() -> Self {
-        let all_minions = vec![
-            MinionTemplate {
-                name: "🐉暴怒龙人".into(),
-                attack: 2,
-                health: 4,
-                tier: 1,
-                minion_type: MinionType::Dragon,
-            },
-            MinionTemplate {
-                name: "🐺凶暴狼".into(),
-                attack: 3,
-                health: 1,
-                tier: 1,
-                minion_type: MinionType::Beast,
-            },
-            MinionTemplate {
-                name: "🤖机械助手".into(),
-                attack: 1,
-                health: 2,
-                tier: 1,
-                minion_type: MinionType::Mech,
-            },
-            MinionTemplate {
-                name: "👹小鬼".into(),
-                attack: 2,
-                health: 3,
-                tier: 1,
-                minion_type: MinionType::Demon,
-            },
-            MinionTemplate {
-                name: "🏴‍☠️海盗斥候".into(),
-                attack: 3,
-                health: 2,
-                tier: 2,
-                minion_type: MinionType::Pirate,
-            },
-            MinionTemplate {
-                name: "🔥烈焰元素".into(),
-                attack: 4,
-                health: 2,
-                tier: 2,
-                minion_type: MinionType::Elemental,
-            },
-            MinionTemplate {
-                name: "🐲幼龙".into(),
-                attack: 2,
-                health: 5,
-                tier: 2,
-                minion_type: MinionType::Dragon,
-            },
-            MinionTemplate {
-                name: "🤖回收机甲".into(),
-                attack: 1,
-                health: 4,
-                tier: 2,
-                minion_type: MinionType::Mech,
-            },
-            MinionTemplate {
-                name: "👹深渊领主".into(),
-                attack: 4,
-                health: 4,
-                tier: 3,
-                minion_type: MinionType::Demon,
-            },
-            MinionTemplate {
-                name: "🐺狼群首领".into(),
-                attack: 5,
-                health: 5,
-                tier: 3,
-                minion_type: MinionType::Beast,
-            },
-            MinionTemplate {
-                name: "🏴‍☠️海盗船长".into(),
-                attack: 5,
-                health: 3,
-                tier: 3,
-                minion_type: MinionType::Pirate,
-            },
-            MinionTemplate {
-                name: "🔥熔岩巨人".into(),
-                attack: 6,
-                health: 6,
-                tier: 4,
-                minion_type: MinionType::Elemental,
-            },
-            MinionTemplate {
-                name: "🐉远古巨龙".into(),
-                attack: 7,
-                health: 7,
-                tier: 5,
-                minion_type: MinionType::Dragon,
-            },
-            MinionTemplate {
-                name: "🤖终极兵器".into(),
-                attack: 6,
-                health: 8,
-                tier: 5,
-                minion_type: MinionType::Mech,
-            },
-            MinionTemplate {
-                name: "💀死亡之翼".into(),
-                attack: 10,
-                health: 10,
-                tier: 6,
-                minion_type: MinionType::Dragon,
-            },
+        let minions = vec![
+            // ── Tier 1 ──
+            MinionTemplate { name: "魔刃豹".into(),         attack: 4, health: 1,  tier: 1, race: Race::Beast },
+            MinionTemplate { name: "江河弹跳鱼".into(),     attack: 1, health: 1,  tier: 1, race: Race::Beast },
+            MinionTemplate { name: "厄运先知".into(),       attack: 2, health: 1,  tier: 1, race: Race::Demon },
+            MinionTemplate { name: "挑食魔犬".into(),       attack: 1, health: 1,  tier: 1, race: Race::Demon },
+            MinionTemplate { name: "愤怒编织者".into(),     attack: 1, health: 4,  tier: 1, race: Race::Demon },
+            MinionTemplate { name: "血色幸存飞龙".into(),   attack: 3, health: 3,  tier: 1, race: Race::Dragon },
+            MinionTemplate { name: "暮光龙崽".into(),       attack: 1, health: 1,  tier: 1, race: Race::Dragon },
+            MinionTemplate { name: "蓄势主唱幼龙".into(),   attack: 1, health: 1,  tier: 1, race: Race::Dragon },
+            MinionTemplate { name: "爆裂飓风".into(),       attack: 2, health: 1,  tier: 1, race: Race::Elemental },
+            MinionTemplate { name: "沙丘土著".into(),       attack: 3, health: 2,  tier: 1, race: Race::Elemental },
+            MinionTemplate { name: "吵吵机器人".into(),     attack: 1, health: 2,  tier: 1, race: Race::Mech },
+            MinionTemplate { name: "拔线机".into(),         attack: 1, health: 1,  tier: 1, race: Race::Mech },
+            MinionTemplate { name: "好斗的斥候".into(),     attack: 3, health: 3,  tier: 1, race: Race::Murloc },
+            MinionTemplate { name: "无害的骨颅".into(),     attack: 1, health: 1,  tier: 1, race: Race::Undead },
+            MinionTemplate { name: "复活的骑兵".into(),     attack: 2, health: 1,  tier: 1, race: Race::Undead },
+            MinionTemplate { name: "剃刀沼泽地卜师".into(), attack: 2, health: 1,  tier: 1, race: Race::Quilboar },
+            MinionTemplate { name: "晾膘的游客".into(),     attack: 2, health: 3,  tier: 1, race: Race::Quilboar },
+            MinionTemplate { name: "夺金健将".into(),       attack: 1, health: 1,  tier: 1, race: Race::Pirate },
+            MinionTemplate { name: "南海卖艺者".into(),     attack: 3, health: 1,  tier: 1, race: Race::Pirate },
+            MinionTemplate { name: "贪吃的穴居人".into(),   attack: 2, health: 3,  tier: 1, race: Race::Neutral },
+            // ── Tier 2 ──
+            MinionTemplate { name: "哼鸣蜂鸟".into(),       attack: 1, health: 4,  tier: 2, race: Race::Beast },
+            MinionTemplate { name: "下水道老鼠".into(),     attack: 3, health: 2,  tier: 2, race: Race::Beast },
+            MinionTemplate { name: "实验室助理".into(),     attack: 3, health: 4,  tier: 2, race: Race::Demon },
+            MinionTemplate { name: "灵魂回溯者".into(),     attack: 4, health: 1,  tier: 2, race: Race::Demon },
+            MinionTemplate { name: "烈火飞鱼".into(),       attack: 2, health: 4,  tier: 2, race: Race::Dragon },
+            MinionTemplate { name: "贪睡的援护巨龙".into(), attack: 4, health: 3,  tier: 2, race: Race::Dragon },
+            MinionTemplate { name: "泰蕾苟萨".into(),       attack: 4, health: 4,  tier: 2, race: Race::Dragon },
+            MinionTemplate { name: "火焰投球手".into(),     attack: 4, health: 3,  tier: 2, race: Race::Elemental },
+            MinionTemplate { name: "商贩元素".into(),       attack: 3, health: 3,  tier: 2, race: Race::Elemental },
+            MinionTemplate { name: "冰雪投球手".into(),     attack: 3, health: 4,  tier: 2, race: Race::Elemental },
+            MinionTemplate { name: "星元自动机".into(),     attack: 3, health: 4,  tier: 2, race: Race::Mech },
+            MinionTemplate { name: "钢铁猎人".into(),       attack: 2, health: 1,  tier: 2, race: Race::Mech },
+            MinionTemplate { name: "通报警告机".into(),     attack: 1, health: 1,  tier: 2, race: Race::Mech },
+            MinionTemplate { name: "飞行专家".into(),       attack: 3, health: 4,  tier: 2, race: Race::Murloc },
+            MinionTemplate { name: "塔德".into(),           attack: 2, health: 2,  tier: 2, race: Race::Murloc },
+            MinionTemplate { name: "巨饿冬鳍鱼人".into(),   attack: 2, health: 5,  tier: 2, race: Race::Murloc },
+            MinionTemplate { name: "永恒骑士".into(),       attack: 4, health: 1,  tier: 2, race: Race::Undead },
+            MinionTemplate { name: "死亡群居蛛魔".into(),   attack: 1, health: 4,  tier: 2, race: Race::Undead },
+            MinionTemplate { name: "古老之魂".into(),       attack: 3, health: 4,  tier: 2, race: Race::Undead },
+            MinionTemplate { name: "野猪预言者".into(),     attack: 2, health: 3,  tier: 2, race: Race::Quilboar },
+            MinionTemplate { name: "挑衅的船工".into(),     attack: 2, health: 5,  tier: 2, race: Race::Pirate },
+            MinionTemplate { name: "白赚赌徒".into(),       attack: 3, health: 3,  tier: 2, race: Race::Pirate },
+            MinionTemplate { name: "新锐植物学家".into(),   attack: 3, health: 4,  tier: 2, race: Race::Neutral },
+            MinionTemplate { name: "耐心的侦查员".into(),   attack: 1, health: 1,  tier: 2, race: Race::Neutral },
+            // ── Tier 3 ──
+            MinionTemplate { name: "狡猾的迅猛龙".into(),   attack: 1, health: 3,  tier: 3, race: Race::Beast },
+            MinionTemplate { name: "邪能元素".into(),       attack: 3, health: 3,  tier: 3, race: Race::Demon },
+            MinionTemplate { name: "吸血地狱犬".into(),     attack: 3, health: 3,  tier: 3, race: Race::Demon },
+            MinionTemplate { name: "琥珀卫士".into(),       attack: 3, health: 2,  tier: 3, race: Race::Dragon },
+            MinionTemplate { name: "钩牙船长".into(),       attack: 1, health: 4,  tier: 3, race: Race::Dragon },
+            MinionTemplate { name: "野火元素".into(),       attack: 6, health: 3,  tier: 3, race: Race::Elemental },
+            MinionTemplate { name: "聚积风暴".into(),       attack: 5, health: 1,  tier: 3, race: Race::Elemental },
+            MinionTemplate { name: "偏折机器人".into(),     attack: 3, health: 2,  tier: 3, race: Race::Mech },
+            MinionTemplate { name: "吵吵模组".into(),       attack: 2, health: 4,  tier: 3, race: Race::Mech },
+            MinionTemplate { name: "手风琴机器人".into(),   attack: 3, health: 3,  tier: 3, race: Race::Mech },
+            MinionTemplate { name: "拜戈尔格国王".into(),   attack: 2, health: 3,  tier: 3, race: Race::Murloc },
+            MinionTemplate { name: "刺豚野猪".into(),       attack: 2, health: 6,  tier: 3, race: Race::Quilboar },
+            MinionTemplate { name: "刺头吹笛人".into(),     attack: 5, health: 1,  tier: 3, race: Race::Quilboar },
+            MinionTemplate { name: "暗膘爵士乐手".into(),   attack: 2, health: 5,  tier: 3, race: Race::Quilboar },
+            MinionTemplate { name: "佩吉·斯特迪伯".into(), attack: 2, health: 1,  tier: 3, race: Race::Pirate },
+            MinionTemplate { name: "断手被遗忘者".into(),   attack: 2, health: 1,  tier: 3, race: Race::Undead },
+            MinionTemplate { name: "致命的孢子".into(),     attack: 1, health: 1,  tier: 3, race: Race::Neutral },
+            // ── Tier 4 ──
+            MinionTemplate { name: "香蕉猛击者".into(),     attack: 3, health: 6,  tier: 4, race: Race::Beast },
+            MinionTemplate { name: "铁喙猫头鹰".into(),     attack: 5, health: 4,  tier: 4, race: Race::Beast },
+            MinionTemplate { name: "舞者达瑞尔".into(),     attack: 5, health: 4,  tier: 4, race: Race::Demon },
+            MinionTemplate { name: "火药运输工".into(),     attack: 4, health: 5,  tier: 4, race: Race::Demon },
+            MinionTemplate { name: "末日之卵".into(),       attack: 0, health: 5,  tier: 4, race: Race::Dragon },
+            MinionTemplate { name: "冲浪的希尔梵".into(),   attack: 4, health: 6,  tier: 4, race: Race::Elemental },
+            MinionTemplate { name: "机械剑龙".into(),       attack: 3, health: 5,  tier: 4, race: Race::Mech },
+            MinionTemplate { name: "寻宝鱼人".into(),       attack: 4, health: 4,  tier: 4, race: Race::Murloc },
+            MinionTemplate { name: "拜戈尔格王后".into(),   attack: 6, health: 3,  tier: 4, race: Race::Murloc },
+            MinionTemplate { name: "瘟疫行者".into(),       attack: 4, health: 2,  tier: 4, race: Race::Undead },
+            MinionTemplate { name: "过路旅客".into(),       attack: 1, health: 10, tier: 4, race: Race::Neutral },
+            MinionTemplate { name: "隧道爆破者".into(),     attack: 3, health: 7,  tier: 4, race: Race::Neutral },
+            // ── Tier 5 ──
+            MinionTemplate { name: "鼠王".into(),           attack: 4, health: 6,  tier: 5, race: Race::Beast },
+            MinionTemplate { name: "刺背恶霸".into(),       attack: 8, health: 2,  tier: 5, race: Race::Beast },
+            MinionTemplate { name: "大方的地卜师".into(),   attack: 4, health: 6,  tier: 5, race: Race::Demon },
+            MinionTemplate { name: "提克特斯".into(),       attack: 3, health: 6,  tier: 5, race: Race::Demon },
+            MinionTemplate { name: "玛里苟斯".into(),       attack: 4, health: 12, tier: 5, race: Race::Dragon },
+            MinionTemplate { name: "狂风之翼".into(),       attack: 16, health: 8, tier: 5, race: Race::Dragon },
+            MinionTemplate { name: "死神4000型".into(),     attack: 6, health: 2,  tier: 5, race: Race::Mech },
+            MinionTemplate { name: "菌菇术士弗洛格尔".into(), attack: 4, health: 8, tier: 5, race: Race::Murloc },
+            MinionTemplate { name: "尤朵拉船长".into(),     attack: 10, health: 5, tier: 5, race: Race::Pirate },
+            MinionTemplate { name: "布莱恩·铜须".into(),   attack: 2,  health: 4, tier: 5, race: Race::Neutral },
+            MinionTemplate { name: "瑞文戴尔男爵".into(),   attack: 1,  health: 7, tier: 5, race: Race::Neutral },
+            // ── Tier 6 ──
+            MinionTemplate { name: "戈德林大狼".into(),     attack: 8,  health: 8,  tier: 6, race: Race::Beast },
+            MinionTemplate { name: "饥饿的魔蝠".into(),     attack: 9,  health: 5,  tier: 6, race: Race::Demon },
+            MinionTemplate { name: "卡雷苟斯".into(),       attack: 4,  health: 12, tier: 6, race: Race::Dragon },
+            MinionTemplate { name: "死亡之翼".into(),       attack: 10, health: 10, tier: 6, race: Race::Dragon },
+            MinionTemplate { name: "小瞎眼".into(),         attack: 8,  health: 8,  tier: 6, race: Race::Elemental },
+            MinionTemplate { name: "机械加拉克隆".into(),   attack: 6,  health: 6,  tier: 6, race: Race::Mech },
+            MinionTemplate { name: "天空上尉库拉格".into(), attack: 4,  health: 6,  tier: 6, race: Race::Pirate },
+            MinionTemplate { name: "缝合怪".into(),         attack: 6,  health: 7,  tier: 6, race: Race::Neutral },
         ];
-
-        Self { all_minions }
+        Self { minions, rng: StdRng::from_entropy() }
     }
 
-    fn refresh_shop(&mut self, commands: &mut Commands, player_tier: i32) {
-        let mut rng = rand::thread_rng();
-
-        let available: Vec<&MinionTemplate> = self
-            .all_minions
-            .iter()
-            .filter(|m| m.tier <= player_tier)
-            .collect();
-
-        if available.is_empty() {
-            return;
-        }
-
-        let count = available.len().min(SHOP_SIZE);
-        let indices: Vec<usize> = rand::seq::index::sample(&mut rng, available.len(), count)
-            .into_vec();
-
-        for (slot, &idx) in indices.iter().enumerate() {
-            let template = &available[idx];
-            let minion = Minion {
-                name: template.name.clone(),
-                attack: template.attack,
-                health: template.health,
-                max_health: template.health,
-                tier: template.tier,
-                minion_type: template.minion_type.clone(),
-            };
-
-            let x = -150.0 + slot as f32 * 100.0;
-            commands
-                .spawn((
-                    Sprite {
-                        color: Color::srgb(0.12, 0.12, 0.12),
-                        custom_size: Some(Vec2::new(CARD_WIDTH, CARD_HEIGHT)),
-                        ..default()
-                    },
-                    Transform::from_xyz(x, SHOP_Y, 5.0),
-                    minion.clone(),
-                    ShopSlot(slot),
-                    InShop,
-                    Name::new(format!("shop_{}", slot)),
-                ))
-                .with_children(|parent| {
-                    parent.spawn((
-                        Text2d::new(format!("{}", minion.name)),
-                        TextFont {
-                            font_size: 10.0,
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
-                        Transform::from_xyz(0.0, 48.0, 1.0),
-                    ));
-                    parent.spawn((
-                        Text2d::new(format!("⚔{}", minion.attack)),
-                        TextFont {
-                            font_size: 13.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(1.0, 0.9, 0.3)),
-                        Transform::from_xyz(-28.0, -50.0, 1.0),
-                    ));
-                    parent.spawn((
-                        Text2d::new(format!("❤{}", minion.health)),
-                        TextFont {
-                            font_size: 13.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(1.0, 0.25, 0.25)),
-                        Transform::from_xyz(28.0, -50.0, 1.0),
-                    ));
-                    parent.spawn((
-                        Text2d::new(format!("⭐{}", minion.tier)),
-                        TextFont {
-                            font_size: 10.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(1.0, 0.8, 0.3)),
-                        Transform::from_xyz(0.0, -63.0, 1.0),
-                    ));
-                    parent.spawn((
-                        Text2d::new(format!("💰3金")),
-                        TextFont {
-                            font_size: 10.0,
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.4, 0.9, 0.3)),
-                        Transform::from_xyz(0.0, -76.0, 1.0),
-                    ));
-                });
+    fn refresh_shop(&mut self, cmds: &mut Commands, tier: i32) {
+        let avail: Vec<&MinionTemplate> = self.minions.iter().filter(|t| t.tier <= tier).collect();
+        if avail.is_empty() { return; }
+        let n = avail.len().min(SHOP_SIZE);
+        let idxs: Vec<usize> = rand::seq::index::sample(&mut self.rng, avail.len(), n).into_vec();
+        for (i, &idx) in idxs.iter().enumerate() {
+            let t = &avail[idx];
+            let m = Minion { name: t.name.clone(), attack: t.attack, health: t.health, tier: t.tier, race: t.race.clone() };
+            let x = -150. + i as f32 * 100.;
+            cmds.spawn((
+                Sprite { color: Color::srgb(0.10, 0.10, 0.10), custom_size: Some(Vec2::new(CARD_W, CARD_H)), ..default() },
+                Transform::from_xyz(x, SHOP_Y, 5.), m.clone(), ShopSlot(i), InShop, Name::new(format!("shop_{}", i)),
+            ))
+            .with_children(|p| {
+                p.spawn((Text2d::new(format!("{}{}", m.race.icon(), m.name)),
+                    TextFont { font_size: 9., ..default() }, TextColor(Color::WHITE), Transform::from_xyz(0., 48., 1.)));
+                p.spawn((Text2d::new(format!("⚔{}", m.attack)),
+                    TextFont { font_size: 12., ..default() }, TextColor(Color::srgb(1., 0.9, 0.3)), Transform::from_xyz(-28., -50., 1.)));
+                p.spawn((Text2d::new(format!("❤{}", m.health)),
+                    TextFont { font_size: 12., ..default() }, TextColor(Color::srgb(1., 0.25, 0.25)), Transform::from_xyz(28., -50., 1.)));
+                p.spawn((Text2d::new(format!("⭐{}", m.tier)),
+                    TextFont { font_size: 9., ..default() }, TextColor(Color::srgb(1., 0.8, 0.3)), Transform::from_xyz(0., -63., 1.)));
+                p.spawn((Text2d::new("💰3金"),
+                    TextFont { font_size: 9., ..default() }, TextColor(Color::srgb(0.4, 0.9, 0.3)), Transform::from_xyz(0., -76., 1.)));
+            });
         }
     }
 
-    fn spawn_enemy_board(&mut self, commands: &mut Commands, player_tier: i32) {
-        let mut rng = rand::thread_rng();
-        let count = (player_tier as usize + 1).min(MAX_BOARD_SIZE);
-
-        let available: Vec<&MinionTemplate> = self
-            .all_minions
-            .iter()
-            .filter(|m| m.tier <= player_tier)
-            .collect();
-
-        if available.is_empty() {
-            return;
-        }
-
-        for i in 0..count {
-            let idx = rng.gen_range(0..available.len());
-            let template = &available[idx];
-
-            let minion = Minion {
-                name: template.name.clone(),
-                attack: template.attack,
-                health: template.health,
-                max_health: template.health,
-                tier: template.tier,
-                minion_type: template.minion_type.clone(),
-            };
-
-            spawn_minion_card(commands, &minion, i, true);
+    fn spawn_enemy(&mut self, cmds: &mut Commands, tier: i32, font: &Handle<Font>) {
+        let avail: Vec<&MinionTemplate> = self.minions.iter().filter(|t| t.tier <= tier).collect();
+        if avail.is_empty() { return; }
+        let n = (tier as usize + 2).min(MAX_BOARD);
+        for i in 0..n {
+            let t = &avail[self.rng.gen_range(0..avail.len())];
+            let m = Minion { name: t.name.clone(), attack: t.attack, health: t.health, tier: t.tier, race: t.race.clone() };
+            spawn_card(cmds, &m, i, true, font);
         }
     }
 }
