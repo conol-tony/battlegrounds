@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use rand::prelude::*;
 use rand::rngs::StdRng;
+use std::collections::HashMap;
 use bevy::window::WindowResolution;
 
 const CARD_W: f32 = 80.0;
@@ -66,6 +67,8 @@ enum GameState { #[default] Shop, Battle, GameOver }
 
 struct MinionTemplate { name: String, attack: i32, health: i32, tier: i32, race: Race }
 #[derive(Resource)] struct GameData { minions: Vec<MinionTemplate>, rng: StdRng }
+#[derive(Resource)]
+struct CardImages { handles: HashMap<String, Handle<Image>> }
 
 fn main() {
     App::new()
@@ -82,7 +85,7 @@ fn main() {
         .add_message::<SellMinion>()
         .add_message::<RefreshShop>()
         .add_message::<EndTurn>()
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, load_card_images).chain())
         .add_systems(Update, (
             handle_input, handle_messages, update_shop_ui,
         ).run_if(in_state(GameState::Shop)))
@@ -189,6 +192,7 @@ fn handle_messages(
     mut ev_refresh: MessageReader<RefreshShop>,
     mut ev_end: MessageReader<EndTurn>,
     font: Res<FontHandle>,
+    card_images: Res<CardImages>,
 ) {
     let Ok(mut player) = player.single_mut() else { return };
 
@@ -201,7 +205,7 @@ fn handle_messages(
             let used: Vec<usize> = q_board.iter().map(|(_, _, s)| s.0).collect();
             if let Some(i) = (0..MAX_BOARD).find(|i| !used.contains(i)) {
                 player.gold -= 3;
-                spawn_card(&mut commands, &m, i, false, &font.0);
+                spawn_card(&mut commands, &m, i, false, &font.0, &card_images);
             }
         }
     }
@@ -230,7 +234,7 @@ fn handle_messages(
     for _ in ev_end.read() {
         if q_board.iter().filter(|(_, _, s)| s.0 < 100).count() == 0 { continue; }
         for (e, _, _) in q_shop.iter() { commands.entity(e).despawn(); }
-        game_data.spawn_enemy(&mut commands, player.tier, &font.0);
+        game_data.spawn_enemy(&mut commands, player.tier, &font.0, &card_images);
         next_state.set(GameState::Battle);
         commands.spawn((BattleTimer { timer: Timer::from_seconds(0.6, TimerMode::Once), resolved: false }, Name::new("bt")));
     }
@@ -314,23 +318,38 @@ fn game_over_ui(
     if keys.just_pressed(KeyCode::Escape) { std::process::exit(0); }
 }
 
-fn spawn_card(commands: &mut Commands, m: &Minion, i: usize, enemy: bool, font: &Handle<Font>) -> Entity {
+fn spawn_card(commands: &mut Commands, m: &Minion, i: usize, enemy: bool, font: &Handle<Font>, images: &CardImages) -> Entity {
     let slot = if enemy { 100 + i } else { i };
     let x = -300. + i as f32 * 100.;
     let y = if enemy { ENEMY_BOARD_Y } else { BOARD_Y };
     let color = if enemy { Color::srgb(0.55, 0.12, 0.12) } else { Color::srgb(0.12, 0.28, 0.55) };
     let ff = |s: f32| TextFont { font: font.clone(), font_size: s, ..default() };
 
-    commands.spawn((
-        Sprite { color, custom_size: Some(Vec2::new(CARD_W, CARD_H)), ..default() },
-        Transform::from_xyz(x, y, 5.), m.clone(), BoardSlot(slot), OnBoard, Name::new(format!("c_{}", m.name)),
-    ))
-    .with_children(|p| {
-        p.spawn((Text2d::new(format!("{}{}", m.race.icon(), m.name)), ff(9.), TextColor(Color::WHITE), Transform::from_xyz(0., 48., 1.)));
-        p.spawn((Text2d::new(format!("⚔{}", m.attack)), ff(12.), TextColor(Color::srgb(1., 0.9, 0.3)), Transform::from_xyz(-28., -50., 1.)));
-        p.spawn((Text2d::new(format!("❤{}", m.health)), ff(12.), TextColor(Color::srgb(1., 0.25, 0.25)), Transform::from_xyz(28., -50., 1.)));
-        p.spawn((Text2d::new(format!("⭐{}", m.tier)), ff(9.), TextColor(Color::srgb(1., 0.8, 0.3)), Transform::from_xyz(0., -63., 1.)));
-    }).id()
+    let key = card_image_key(&m.name);
+    let img = if !key.is_empty() { images.handles.get(key).cloned() } else { None };
+
+    if let Some(tex) = img {
+        commands.spawn((
+            Sprite { color: Color::WHITE, custom_size: Some(Vec2::new(CARD_W, CARD_H)), image: tex, ..default() },
+            Transform::from_xyz(x, y, 5.), m.clone(), BoardSlot(slot), OnBoard, Name::new(format!("c_{}", m.name)),
+        ))
+        .with_children(|p| {
+            p.spawn((Text2d::new(format!("⚔{}", m.attack)), ff(12.), TextColor(Color::srgb(1., 0.9, 0.3)), Transform::from_xyz(-28., -50., 1.)));
+            p.spawn((Text2d::new(format!("❤{}", m.health)), ff(12.), TextColor(Color::srgb(1., 0.25, 0.25)), Transform::from_xyz(28., -50., 1.)));
+            p.spawn((Text2d::new(format!("⭐{}", m.tier)), ff(9.), TextColor(Color::srgb(1., 0.8, 0.3)), Transform::from_xyz(0., -63., 1.)));
+        }).id()
+    } else {
+        commands.spawn((
+            Sprite { color, custom_size: Some(Vec2::new(CARD_W, CARD_H)), ..default() },
+            Transform::from_xyz(x, y, 5.), m.clone(), BoardSlot(slot), OnBoard, Name::new(format!("c_{}", m.name)),
+        ))
+        .with_children(|p| {
+            p.spawn((Text2d::new(format!("{}{}", m.race.icon(), m.name)), ff(9.), TextColor(Color::WHITE), Transform::from_xyz(0., 48., 1.)));
+            p.spawn((Text2d::new(format!("⚔{}", m.attack)), ff(12.), TextColor(Color::srgb(1., 0.9, 0.3)), Transform::from_xyz(-28., -50., 1.)));
+            p.spawn((Text2d::new(format!("❤{}", m.health)), ff(12.), TextColor(Color::srgb(1., 0.25, 0.25)), Transform::from_xyz(28., -50., 1.)));
+            p.spawn((Text2d::new(format!("⭐{}", m.tier)), ff(9.), TextColor(Color::srgb(1., 0.8, 0.3)), Transform::from_xyz(0., -63., 1.)));
+        }).id()
+    }
 }
 
 impl GameData {
@@ -466,14 +485,14 @@ impl GameData {
         }
     }
 
-    fn spawn_enemy(&mut self, cmds: &mut Commands, tier: i32, font: &Handle<Font>) {
+    fn spawn_enemy(&mut self, cmds: &mut Commands, tier: i32, font: &Handle<Font>, images: &CardImages) {
         let avail: Vec<&MinionTemplate> = self.minions.iter().filter(|t| t.tier <= tier).collect();
         if avail.is_empty() { return; }
         let n = (tier as usize + 2).min(MAX_BOARD);
         for i in 0..n {
             let t = &avail[self.rng.gen_range(0..avail.len())];
             let m = Minion { name: t.name.clone(), attack: t.attack, health: t.health, tier: t.tier, race: t.race.clone() };
-            spawn_card(cmds, &m, i, true, font);
+            spawn_card(cmds, &m, i, true, font, images);
         }
     }
 }
@@ -501,5 +520,72 @@ fn animate_dying(
         tf.scale = Vec3::splat(1.0 - t * 0.8);
         sprite.color.set_alpha(1.0 - t);
         if dy.timer.just_finished() { commands.entity(e).despawn(); }
+    }
+}
+
+fn load_card_images(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let mut handles: HashMap<String, Handle<Image>> = HashMap::new();
+    let names = [
+        "Amber_Guardian","Ancestral_Automaton","Annoy-o-Module","Annoy-o-Tron",
+        "Banana_Slamma","Bazaar_Dealer","Brann_Bronzebeard","Crackling_Cyclone",
+        "Deflect-o-Bot","Dune_Dweller","Eternal_Knight","Famished_Felbat",
+        "Felemental","Freedealing_Gambler","Gluttonous_Trogg","Goldrinn_the_Great_Wolf",
+        "Harmless_Bonehead","Humming_Bird","Kalecgos_Arcane_Aspect","King_Bagurgle",
+        "Laboratory_Assistant","Malchezaar_Prince_of_Dance","Manasaber",
+        "Moonsteel_Juggernaut","Nightbane_Ignited","One-Amalgam_Tour_Group",
+        "Prophet_of_the_Boar","Pufferquil","Razorfen_Geomancer","Risen_Rider",
+        "Scarlet_Survivor","Scrap_Scraper","Sellemental","Sewer_Rat",
+        "Southsea_Busker","Sun-Bacon_Relaxer","Tarecgosa","Titus_Rivendare",
+        "Tunnel_Blaster","Wrath_Weaver",
+    ];
+    for n in names {
+        handles.insert(n.to_string(), asset_server.load(format!("cards/{}.png", n)));
+    }
+    commands.insert_resource(CardImages { handles });
+}
+
+fn card_image_key(zh_name: &str) -> &str {
+    match zh_name {
+        "吵吵机器人" => "Annoy-o-Tron",
+        "爆裂飓风" => "Crackling_Cyclone",
+        "沙丘土著" => "Dune_Dweller",
+        "无害的骨颅" => "Harmless_Bonehead",
+        "魔刃豹" => "Manasaber",
+        "愤怒编织者" => "Wrath_Weaver",
+        "血色幸存飞龙" => "Scarlet_Survivor",
+        "晾膘的游客" => "Sun-Bacon_Relaxer",
+        "南海卖艺者" => "Southsea_Busker",
+        "贪吃的穴居人" => "Gluttonous_Trogg",
+        "复活的骑兵" => "Risen_Rider",
+        "剃刀沼泽地卜师" => "Razorfen_Geomancer",
+        "哼鸣蜂鸟" => "Humming_Bird",
+        "下水道老鼠" => "Sewer_Rat",
+        "永恒骑士" => "Eternal_Knight",
+        "泰蕾苟萨" => "Tarecgosa",
+        "商贩元素" => "Sellemental",
+        "星元自动机" => "Ancestral_Automaton",
+        "白赚赌徒" => "Freedealing_Gambler",
+        "实验室助理" => "Laboratory_Assistant",
+        "野猪预言者" => "Prophet_of_the_Boar",
+        "偏折机器人" => "Deflect-o-Bot",
+        "吵吵模组" => "Annoy-o-Module",
+        "拜戈尔格国王" => "King_Bagurgle",
+        "邪能元素" => "Felemental",
+        "刺豚野猪" => "Pufferquil",
+        "琥珀卫士" => "Amber_Guardian",
+        "香蕉猛击者" => "Banana_Slamma",
+        "舞者达瑞尔" => "Malchezaar_Prince_of_Dance",
+        "隧道爆破者" => "Tunnel_Blaster",
+        "布莱恩·铜须" => "Brann_Bronzebeard",
+        "瑞文戴尔男爵" => "Titus_Rivendare",
+        "玛里苟斯" => "Kalecgos_Arcane_Aspect",
+        "大方的地卜师" => "Bazaar_Dealer",
+        "死神4000型" => "Scrap_Scraper",
+        "戈德林大狼" => "Goldrinn_the_Great_Wolf",
+        "饥饿的魔蝠" => "Famished_Felbat",
+        "狂风之翼" => "Nightbane_Ignited",
+        "缝合怪" => "One-Amalgam_Tour_Group",
+        "机械加拉克隆" => "Moonsteel_Juggernaut",
+        _ => "",
     }
 }
