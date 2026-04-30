@@ -51,6 +51,10 @@ impl Race {
 #[derive(Component)] struct Player { gold: i32, tier: i32, health: i32 }
 #[derive(Component)] struct Enemy  { health: i32, tier: i32 }
 #[derive(Component)] struct BattleTimer { timer: Timer, resolved: bool }
+#[derive(Component)]
+struct DamageText { timer: Timer, velocity: Vec2 }
+#[derive(Component)]
+struct Dying { timer: Timer }
 #[derive(Resource)] struct FontHandle(Handle<Font>);
 #[derive(States, Clone, Eq, PartialEq, Hash, Debug, Default)]
 enum GameState { #[default] Shop, Battle, GameOver }
@@ -84,6 +88,7 @@ fn main() {
         ).run_if(in_state(GameState::Shop)))
         .add_systems(Update, run_battle.run_if(in_state(GameState::Battle)))
         .add_systems(Update, game_over_ui.run_if(in_state(GameState::GameOver)))
+        .add_systems(Update, (animate_damage_texts, animate_dying).chain())
         .run();
 }
 
@@ -188,9 +193,10 @@ fn handle_messages(
     let Ok(mut player) = player.single_mut() else { return };
 
     // buy
-    for BuyMinion(slot) in ev_buy.read() {
+    for ev in ev_buy.read() {
+        let slot = ev.0;
         if player.gold < 3 || q_board.iter().count() >= MAX_BOARD { continue; }
-        if let Some((se, m)) = q_shop.iter().find(|(_, s, _)| s.0 == *slot).map(|(e, _, m)| (e, m.clone())) {
+        if let Some((se, m)) = q_shop.iter().find(|(_, s, _)| s.0 == slot).map(|(e, _, m)| (e, m.clone())) {
             commands.entity(se).despawn();
             let used: Vec<usize> = q_board.iter().map(|(_, _, s)| s.0).collect();
             if let Some(i) = (0..MAX_BOARD).find(|i| !used.contains(i)) {
@@ -201,11 +207,12 @@ fn handle_messages(
     }
 
     // sell
-    for SellMinion(e) in ev_sell.read() {
-        if let Ok((_, m, s)) = q_board.get(*e) {
+    for ev in ev_sell.read() {
+        let e = ev.0;
+        if let Ok((_, m, s)) = q_board.get(e) {
             if s.0 < 100 {
                 player.gold = (player.gold + m.tier).min(MAX_GOLD);
-                commands.entity(*e).despawn();
+                commands.entity(e).despawn();
             }
         }
     }
@@ -468,5 +475,31 @@ impl GameData {
             let m = Minion { name: t.name.clone(), attack: t.attack, health: t.health, tier: t.tier, race: t.race.clone() };
             spawn_card(cmds, &m, i, true, font);
         }
+    }
+}
+
+fn animate_damage_texts(
+    mut commands: Commands, time: Res<Time>,
+    mut q: Query<(Entity, &mut Transform, &mut Text2d, &mut DamageText)>,
+) {
+    for (e, mut tf, mut text, mut dt) in q.iter_mut() {
+        dt.timer.tick(time.delta());
+        let t = dt.timer.elapsed_secs() / dt.timer.duration().as_secs_f32();
+        tf.translation += (dt.velocity * time.delta_secs()).extend(0.);
+        text.0 = text.0.clone(); // keep text
+        if dt.timer.just_finished() { commands.entity(e).despawn(); }
+    }
+}
+
+fn animate_dying(
+    mut commands: Commands, time: Res<Time>,
+    mut q: Query<(Entity, &mut Transform, &mut Sprite, &mut Dying)>,
+) {
+    for (e, mut tf, mut sprite, mut dy) in q.iter_mut() {
+        dy.timer.tick(time.delta());
+        let t = dy.timer.elapsed_secs() / dy.timer.duration().as_secs_f32();
+        tf.scale = Vec3::splat(1.0 - t * 0.8);
+        sprite.color.set_alpha(1.0 - t);
+        if dy.timer.just_finished() { commands.entity(e).despawn(); }
     }
 }
