@@ -12,6 +12,7 @@ const ENEMY_BOARD_Y: f32 = 100.0;
 const MAX_GOLD: i32 = 10;
 const MAX_BOARD: usize = 7;
 const SHOP_SIZE: usize = 4;
+const MAX_TIER: i32 = 6;
 
 #[derive(Component, Clone, Debug)]
 struct Minion {
@@ -48,14 +49,21 @@ impl Race {
 #[derive(Component)] struct BoardSlot(usize);
 #[derive(Component)] struct InShop;
 #[derive(Component)] struct OnBoard;
-#[derive(Component)] struct UiLabel;
+#[derive(Component)] struct Frozen;
 #[derive(Component)] struct Player { gold: i32, tier: i32, health: i32 }
 #[derive(Component)] struct Enemy  { health: i32, tier: i32 }
-#[derive(Component)] struct BattleTimer { timer: Timer, resolved: bool }
+#[derive(Component)] struct BattleTimer { timer: Timer }
 #[derive(Component)]
 struct DamageText { timer: Timer, velocity: Vec2 }
 #[derive(Component)]
 struct Dying { timer: Timer }
+
+#[derive(Component)]
+struct CombatStats { attack: i32, health: i32 }
+
+#[derive(Component)]
+enum UiRole { PlayerInfo, EnemyInfo, GameOverTitle, GameOverSub, Hint }
+
 #[derive(Resource)] struct FontHandle(Handle<Font>);
 #[derive(States, Clone, Eq, PartialEq, Hash, Debug, Default)]
 enum GameState { #[default] Shop, Battle, GameOver }
@@ -64,11 +72,20 @@ enum GameState { #[default] Shop, Battle, GameOver }
 #[derive(Message)] struct SellMinion(Entity);
 #[derive(Message)] struct RefreshShop;
 #[derive(Message)] struct EndTurn;
+#[derive(Message)] struct UpgradeTavern;
+#[derive(Message)] struct ToggleFreeze;
 
 struct MinionTemplate { name: String, attack: i32, health: i32, tier: i32, race: Race }
 #[derive(Resource)] struct GameData { minions: Vec<MinionTemplate>, rng: StdRng }
 #[derive(Resource)]
 struct CardImages { handles: HashMap<String, Handle<Image>> }
+
+#[derive(Resource, Default)]
+struct ShopState { frozen: bool }
+
+fn tier_upgrade_cost(tier: i32) -> i32 {
+    (6 - tier).max(2)
+}
 
 fn main() {
     App::new()
@@ -81,17 +98,20 @@ fn main() {
             ..default()
         }))
         .init_state::<GameState>()
+        .init_resource::<ShopState>()
         .add_message::<BuyMinion>()
         .add_message::<SellMinion>()
         .add_message::<RefreshShop>()
         .add_message::<EndTurn>()
+        .add_message::<UpgradeTavern>()
+        .add_message::<ToggleFreeze>()
         .add_systems(Startup, (setup, load_card_images).chain())
         .add_systems(Update, (
             handle_input, handle_messages, update_shop_ui,
         ).run_if(in_state(GameState::Shop)))
         .add_systems(Update, run_battle.run_if(in_state(GameState::Battle)))
         .add_systems(Update, game_over_ui.run_if(in_state(GameState::GameOver)))
-        .add_systems(Update, (animate_damage_texts, animate_dying).chain())
+        .add_systems(Update, (animate_damage_texts, animate_dying))
         .run();
 }
 
@@ -109,52 +129,92 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((Player { gold: 3, tier: 1, health: 40 }, Name::new("player")));
     commands.spawn((Enemy  { health: 40, tier: 1 }, Name::new("enemy")));
 
-    // player info (x=-300, y=355)
-    commands.spawn((Text2d::new(""), ff(13.), TextColor(Color::WHITE), Transform::from_xyz(-300., 355., 10.), UiLabel));
-    // enemy info (x=250, y=355)
-    commands.spawn((Text2d::new(""), ff(13.), TextColor(Color::srgb(1., 0.4, 0.4)), Transform::from_xyz(250., 355., 10.), UiLabel));
-    // game over title (x=0, y=355)
-    commands.spawn((Text2d::new(""), ff(22.), TextColor(Color::WHITE), Transform::from_xyz(0., 355., 10.), UiLabel));
-    // game over subtitle (x=0, y=320)
-    commands.spawn((Text2d::new(""), ff(14.), TextColor(Color::srgb(0.8, 0.8, 0.8)), Transform::from_xyz(0., 320., 10.), UiLabel));
-    // hint bar
-    commands.spawn((Text2d::new("按 B 购买 | S 出售选中 | R 刷新(1金) | E/空格 结束回合 | 1-7 选中随从"), ff(11.), TextColor(Color::srgb(0.6, 0.6, 0.6)), Transform::from_xyz(0., -380., 10.), UiLabel));
-    // section labels
+    commands.spawn((Text2d::new(""), ff(13.), TextColor(Color::WHITE), Transform::from_xyz(-300., 355., 10.), UiRole::PlayerInfo));
+    commands.spawn((Text2d::new(""), ff(13.), TextColor(Color::srgb(1., 0.4, 0.4)), Transform::from_xyz(250., 355., 10.), UiRole::EnemyInfo));
+    commands.spawn((Text2d::new(""), ff(22.), TextColor(Color::WHITE), Transform::from_xyz(0., 355., 10.), UiRole::GameOverTitle));
+    commands.spawn((Text2d::new(""), ff(14.), TextColor(Color::srgb(0.8, 0.8, 0.8)), Transform::from_xyz(0., 320., 10.), UiRole::GameOverSub));
+    commands.spawn((Text2d::new("B 购买 | S 出售 | R 刷新(1金) | T 升级 | F 冻结 | E/空格 结束 | 1-4 选商店 | Q/W 切换格"), ff(10.), TextColor(Color::srgb(0.6, 0.6, 0.6)), Transform::from_xyz(0., -380., 10.), UiRole::Hint));
     commands.spawn((Text2d::new("── 商店 ──"), ff(12.), TextColor(Color::srgb(0.6, 0.6, 0.6)), Transform::from_xyz(0., -220., 10.)));
     commands.spawn((Text2d::new("── 我方战场 ──"), ff(12.), TextColor(Color::srgb(0.4, 0.7, 1.0)), Transform::from_xyz(0., -40., 10.)));
     commands.spawn((Text2d::new("── 敌方战场 ──"), ff(12.), TextColor(Color::srgb(1., 0.4, 0.4)), Transform::from_xyz(0., 160., 10.)));
 
-    // divider
     commands.spawn((Sprite { color: Color::srgb(0.3, 0.3, 0.3), custom_size: Some(Vec2::new(780., 1.)), ..default() }, Transform::from_xyz(0., -245., 2.)));
 
     let mut gd = GameData::new();
-    gd.refresh_shop(&mut commands, 1);
+    gd.refresh_shop(&mut commands, 1, &font);
     commands.insert_resource(gd);
 }
 
 fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
-    mut sel: Local<Option<Entity>>,
+    mut sel_board: Local<Option<Entity>>,
+    mut sel_shop: Local<Option<usize>>,
     q_board: Query<(Entity, &BoardSlot), With<OnBoard>>,
+    q_shop: Query<&ShopSlot, With<InShop>>,
     mut ew_buy: MessageWriter<BuyMinion>,
     mut ew_sell: MessageWriter<SellMinion>,
     mut ew_refresh: MessageWriter<RefreshShop>,
     mut ew_end: MessageWriter<EndTurn>,
-    q_shop: Query<&ShopSlot, With<InShop>>,
+    mut ew_up: MessageWriter<UpgradeTavern>,
+    mut ew_freeze: MessageWriter<ToggleFreeze>,
 ) {
-    for (i, k) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
-                   KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7]
+    // Digit1-4: select shop slot
+    for (i, k) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4]
         .iter().enumerate()
     {
-        if keys.just_pressed(*k) { *sel = q_board.iter().find(|(_, s)| s.0 == i).map(|(e, _)| e); }
+        if keys.just_pressed(*k) {
+            if q_shop.iter().any(|s| s.0 == i) {
+                *sel_shop = Some(i);
+            }
+        }
     }
+
+    let shop_slots: Vec<usize> = {
+        let mut v: Vec<usize> = q_shop.iter().map(|s| s.0).collect();
+        v.sort();
+        v
+    };
+    if !shop_slots.is_empty() {
+        if keys.just_pressed(KeyCode::KeyQ) {
+            let cur = sel_shop.unwrap_or(shop_slots[0]);
+            let pos = shop_slots.iter().position(|&s| s == cur).unwrap_or(0);
+            let new = if pos == 0 { shop_slots.len() - 1 } else { pos - 1 };
+            *sel_shop = Some(shop_slots[new]);
+        }
+        if keys.just_pressed(KeyCode::KeyW) {
+            let cur = sel_shop.unwrap_or(shop_slots[0]);
+            let pos = shop_slots.iter().position(|&s| s == cur).unwrap_or(0);
+            let new = (pos + 1) % shop_slots.len();
+            *sel_shop = Some(shop_slots[new]);
+        }
+        if sel_shop.is_none() {
+            *sel_shop = shop_slots.first().copied();
+        }
+    } else {
+        *sel_shop = None;
+    }
+
+    // Digit5-7: select board slot for selling
+    for (i, k) in [KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7]
+        .iter().enumerate()
+    {
+        if keys.just_pressed(*k) {
+            let slot = i + 4;
+            *sel_board = q_board.iter().find(|(_, s)| s.0 == slot).map(|(e, _)| e);
+        }
+    }
+
     if keys.just_pressed(KeyCode::KeyB) {
-        if let Some(s) = q_shop.iter().next() { ew_buy.write(BuyMinion(s.0)); }
+        if let Some(slot) = *sel_shop {
+            ew_buy.write(BuyMinion(slot));
+        }
     }
     if keys.just_pressed(KeyCode::KeyS) {
-        if let Some(e) = *sel { ew_sell.write(SellMinion(e)); *sel = None; }
+        if let Some(e) = *sel_board { ew_sell.write(SellMinion(e)); *sel_board = None; }
     }
     if keys.just_pressed(KeyCode::KeyR) { ew_refresh.write(RefreshShop); }
+    if keys.just_pressed(KeyCode::KeyT) { ew_up.write(UpgradeTavern); }
+    if keys.just_pressed(KeyCode::KeyF) { ew_freeze.write(ToggleFreeze); }
     if keys.just_pressed(KeyCode::Space) || keys.just_pressed(KeyCode::KeyE) { ew_end.write(EndTurn); }
 }
 
@@ -162,20 +222,26 @@ fn update_shop_ui(
     player: Query<&Player>,
     enemy: Query<&Enemy>,
     q_board: Query<&BoardSlot, With<OnBoard>>,
-    mut ui: Query<(&mut Text2d, &Transform, &UiLabel)>,
-    font: Res<FontHandle>,
+    shop_state: Res<ShopState>,
+    mut ui: Query<(&mut Text2d, &UiRole)>,
 ) {
     let Ok(player) = player.single() else { return };
     let Ok(enemy) = enemy.single() else { return };
     let bn = q_board.iter().filter(|s| s.0 < 100).count();
-    let _ff = |s: f32| TextFont { font: font.0.clone(), font_size: s, ..default() };
-    for (mut t, tr, _) in ui.iter_mut() {
-        let (tx, ty) = (tr.translation.x, tr.translation.y);
-        if (tx + 300.).abs() < 5. && (ty - 355.).abs() < 5. {
-            t.0 = format!("💛HP:{}  👑T{}  💰{}/{}  📦{}/{}", player.health, player.tier, player.gold, MAX_GOLD, bn, MAX_BOARD);
-        }
-        if (tx - 250.).abs() < 5. && (ty - 355.).abs() < 5. {
-            t.0 = format!("💀HP:{}  T{}", enemy.health, enemy.tier);
+    let up_cost = tier_upgrade_cost(player.tier);
+    let frozen_txt = if shop_state.frozen { " ❄冻结" } else { "" };
+    let up_txt = if player.tier >= MAX_TIER { "MAX".to_string() } else { format!("升级{}金", up_cost) };
+
+    for (mut t, role) in ui.iter_mut() {
+        match role {
+            UiRole::PlayerInfo => {
+                t.0 = format!("💛HP:{}  👑T{}  💰{}/{}  📦{}/{}  ⬆{}{}",
+                    player.health, player.tier, player.gold, MAX_GOLD, bn, MAX_BOARD, up_txt, frozen_txt);
+            }
+            UiRole::EnemyInfo => {
+                t.0 = format!("💀HP:{}  T{}", enemy.health, enemy.tier);
+            }
+            _ => {}
         }
     }
 }
@@ -184,6 +250,7 @@ fn handle_messages(
     mut commands: Commands,
     mut player: Query<&mut Player>,
     mut game_data: ResMut<GameData>,
+    mut shop_state: ResMut<ShopState>,
     q_shop: Query<(Entity, &ShopSlot, &Minion), With<InShop>>,
     q_board: Query<(Entity, &Minion, &BoardSlot), (With<OnBoard>, Without<InShop>)>,
     mut next_state: ResMut<NextState<GameState>>,
@@ -191,12 +258,13 @@ fn handle_messages(
     mut ev_sell: MessageReader<SellMinion>,
     mut ev_refresh: MessageReader<RefreshShop>,
     mut ev_end: MessageReader<EndTurn>,
+    mut ev_up: MessageReader<UpgradeTavern>,
+    mut ev_freeze: MessageReader<ToggleFreeze>,
     font: Res<FontHandle>,
     card_images: Res<CardImages>,
 ) {
     let Ok(mut player) = player.single_mut() else { return };
 
-    // buy
     for ev in ev_buy.read() {
         let slot = ev.0;
         if player.gold < 3 || q_board.iter().count() >= MAX_BOARD { continue; }
@@ -210,7 +278,6 @@ fn handle_messages(
         }
     }
 
-    // sell
     for ev in ev_sell.read() {
         let e = ev.0;
         if let Ok((_, m, s)) = q_board.get(e) {
@@ -221,70 +288,141 @@ fn handle_messages(
         }
     }
 
-    // refresh
+    for _ in ev_up.read() {
+        if player.tier >= MAX_TIER { continue; }
+        let cost = tier_upgrade_cost(player.tier);
+        if player.gold >= cost {
+            player.gold -= cost;
+            player.tier += 1;
+        }
+    }
+
+    for _ in ev_freeze.read() {
+        shop_state.frozen = !shop_state.frozen;
+    }
+
     for _ in ev_refresh.read() {
         if player.gold >= 1 {
             player.gold -= 1;
             for (e, _, _) in q_shop.iter() { commands.entity(e).despawn(); }
-            game_data.refresh_shop(&mut commands, player.tier);
+            shop_state.frozen = false;
+            game_data.refresh_shop(&mut commands, player.tier, &font.0);
         }
     }
 
-    // end turn
     for _ in ev_end.read() {
         if q_board.iter().filter(|(_, _, s)| s.0 < 100).count() == 0 { continue; }
-        for (e, _, _) in q_shop.iter() { commands.entity(e).despawn(); }
+        if !shop_state.frozen {
+            for (e, _, _) in q_shop.iter() { commands.entity(e).despawn(); }
+        }
         game_data.spawn_enemy(&mut commands, player.tier, &font.0, &card_images);
         next_state.set(GameState::Battle);
-        commands.spawn((BattleTimer { timer: Timer::from_seconds(0.6, TimerMode::Once), resolved: false }, Name::new("bt")));
+        commands.spawn((BattleTimer { timer: Timer::from_seconds(0.6, TimerMode::Repeating) }, Name::new("bt")));
     }
 }
 
 fn run_battle(
     mut commands: Commands, time: Res<Time>,
     mut qt: Query<(Entity, &mut BattleTimer)>,
-    qm: Query<(Entity, &Minion, &BoardSlot), With<OnBoard>>,
+    mut qm: Query<(Entity, &mut CombatStats, &Transform, &BoardSlot), With<OnBoard>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut player: Query<&mut Player>,
     mut enemy: Query<&mut Enemy>,
+    font: Res<FontHandle>,
 ) {
     let Ok((te, mut bt)) = qt.single_mut() else { return };
-    if bt.resolved { return; }
     bt.timer.tick(time.delta());
     if !bt.timer.just_finished() { return; }
-    bt.resolved = true;
 
-    let (mut pp, mut ep): (i32, i32) = (0, 0);
-    for (_, m, s) in qm.iter() {
-        if s.0 < 100 { pp += m.attack + m.health; } else { ep += m.attack + m.health; }
+    let mut player_side: Vec<(Entity, i32, Vec3)> = Vec::new();
+    let mut enemy_side: Vec<(Entity, i32, Vec3)> = Vec::new();
+    for (e, cs, tf, s) in qm.iter() {
+        if cs.health <= 0 { continue; }
+        if s.0 < 100 {
+            player_side.push((e, cs.attack, tf.translation));
+        } else {
+            enemy_side.push((e, cs.attack, tf.translation));
+        }
     }
-    let won = pp >= ep;
+    player_side.sort_by_key(|x| x.0.index());
+    enemy_side.sort_by_key(|x| x.0.index());
 
-    let Ok(mut p) = player.single_mut() else { return };
-    let Ok(mut e) = enemy.single_mut() else { return };
-    let pc = qm.iter().filter(|(_, _, s)| s.0 < 100).count() as i32;
-    let ec = qm.iter().filter(|(_, _, s)| s.0 >= 100).count() as i32;
-    if won { e.health -= p.tier + pc; } else { p.health -= e.tier + ec; }
+    if player_side.is_empty() || enemy_side.is_empty() {
+        let won = !player_side.is_empty();
+        let Ok(mut p) = player.single_mut() else { return };
+        let Ok(mut e) = enemy.single_mut() else { return };
 
-    for (eid, _, s) in qm.iter() { if s.0 >= 100 { commands.entity(eid).despawn(); } }
-    commands.entity(te).despawn();
+        if won {
+            let surv = player_side.len() as i32;
+            e.health -= p.tier + surv;
+        } else {
+            let surv = enemy_side.len() as i32;
+            p.health -= e.tier + surv;
+        }
 
-    if p.health <= 0 || e.health <= 0 {
-        next_state.set(GameState::GameOver);
-    } else {
-        p.gold = MAX_GOLD;
-        next_state.set(GameState::Shop);
+        let mut to_despawn_enemy: Vec<Entity> = Vec::new();
+        let mut to_clean_player: Vec<Entity> = Vec::new();
+        for (eid, _cs, _tf, s) in qm.iter() {
+            if s.0 >= 100 { to_despawn_enemy.push(eid); } else { to_clean_player.push(eid); }
+        }
+        for eid in to_despawn_enemy { commands.entity(eid).despawn(); }
+        for eid in to_clean_player { commands.entity(eid).remove::<CombatStats>(); }
+        commands.entity(te).despawn();
+
+        if p.health <= 0 || e.health <= 0 {
+            next_state.set(GameState::GameOver);
+        } else {
+            p.gold = MAX_GOLD;
+            next_state.set(GameState::Shop);
+        }
+        return;
+    }
+
+    let (pe, p_atk, p_pos) = player_side[0];
+    let (ee, e_atk, e_pos) = enemy_side[0];
+
+    if let Ok((_, mut cs, _, _)) = qm.get_mut(pe) { cs.health -= e_atk; }
+    if let Ok((_, mut cs, _, _)) = qm.get_mut(ee) { cs.health -= p_atk; }
+
+    let ff = |s: f32| TextFont { font: font.0.clone(), font_size: s, ..default() };
+    if e_atk > 0 {
+        commands.spawn((
+            Text2d::new(format!("-{}", e_atk)), ff(16.),
+            TextColor(Color::srgb(1.0, 0.3, 0.3)),
+            Transform::from_xyz(p_pos.x, p_pos.y + CARD_H * 0.4, 20.),
+            DamageText { timer: Timer::from_seconds(0.6, TimerMode::Once), velocity: Vec2::new(0., 60.) },
+        ));
+    }
+    if p_atk > 0 {
+        commands.spawn((
+            Text2d::new(format!("-{}", p_atk)), ff(16.),
+            TextColor(Color::srgb(1.0, 0.3, 0.3)),
+            Transform::from_xyz(e_pos.x, e_pos.y + CARD_H * 0.4, 20.),
+            DamageText { timer: Timer::from_seconds(0.6, TimerMode::Once), velocity: Vec2::new(0., 60.) },
+        ));
+    }
+
+    if let Ok((_, cs, _, _)) = qm.get(pe) {
+        if cs.health <= 0 {
+            commands.entity(pe).insert(Dying { timer: Timer::from_seconds(0.4, TimerMode::Once) });
+        }
+    }
+    if let Ok((_, cs, _, _)) = qm.get(ee) {
+        if cs.health <= 0 {
+            commands.entity(ee).insert(Dying { timer: Timer::from_seconds(0.4, TimerMode::Once) });
+        }
     }
 }
 
 fn game_over_ui(
     mut player: Query<&mut Player>,
     mut enemy: Query<&mut Enemy>,
-    mut ui: Query<(&mut Text2d, &Transform, &UiLabel)>,
+    mut ui: Query<(&mut Text2d, &UiRole)>,
     keys: Res<ButtonInput<KeyCode>>,
     mut next_state: ResMut<NextState<GameState>>,
     mut commands: Commands,
     mut game_data: ResMut<GameData>,
+    mut shop_state: ResMut<ShopState>,
     q_board: Query<(Entity, &BoardSlot), With<OnBoard>>,
     font: Res<FontHandle>,
 ) {
@@ -292,19 +430,20 @@ fn game_over_ui(
     let Ok(enemy_ref) = enemy.single() else { return };
     let ph = player_ref.health;
     let eh = enemy_ref.health;
-    let _ff = |s: f32| TextFont { font: font.0.clone(), font_size: s, ..default() };
 
-    for (mut t, tr, _) in ui.iter_mut() {
-        let (tx, ty) = (tr.translation.x, tr.translation.y);
-        if tx.abs() < 5. && (ty - 355.).abs() < 5. {
-            t.0 = if ph <= 0 {
-                format!("💀 你输了! 你的HP:{} 敌方HP:{}", ph, eh)
-            } else {
-                format!("🏆 你赢了! 你的HP:{} 敌方HP:{}", ph, eh)
-            };
-        }
-        if tx.abs() < 5. && (ty - 320.).abs() < 5. {
-            t.0 = "按 R 重新开始 | 按 ESC 退出".to_string();
+    for (mut t, role) in ui.iter_mut() {
+        match role {
+            UiRole::GameOverTitle => {
+                t.0 = if ph <= 0 {
+                    format!("💀 你输了! 你的HP:{} 敌方HP:{}", ph, eh)
+                } else {
+                    format!("🏆 你赢了! 你的HP:{} 敌方HP:{}", ph, eh)
+                };
+            }
+            UiRole::GameOverSub => {
+                t.0 = "按 R 重新开始 | 按 ESC 退出".to_string();
+            }
+            _ => {}
         }
     }
 
@@ -312,7 +451,14 @@ fn game_over_ui(
         for (eid, _) in q_board.iter() { commands.entity(eid).despawn(); }
         if let Ok(mut p) = player.single_mut() { *p = Player { gold: 3, tier: 1, health: 40 }; }
         if let Ok(mut e) = enemy.single_mut() { *e = Enemy { health: 40, tier: 1 }; }
-        game_data.refresh_shop(&mut commands, 1);
+        shop_state.frozen = false;
+        game_data.refresh_shop(&mut commands, 1, &font.0);
+        for (mut t, role) in ui.iter_mut() {
+            match role {
+                UiRole::GameOverTitle | UiRole::GameOverSub => { t.0 = String::new(); }
+                _ => {}
+            }
+        }
         next_state.set(GameState::Shop);
     }
     if keys.just_pressed(KeyCode::Escape) { std::process::exit(0); }
@@ -331,7 +477,9 @@ fn spawn_card(commands: &mut Commands, m: &Minion, i: usize, enemy: bool, font: 
     if let Some(tex) = img {
         commands.spawn((
             Sprite { color: Color::WHITE, custom_size: Some(Vec2::new(CARD_W, CARD_H)), image: tex, ..default() },
-            Transform::from_xyz(x, y, 5.), m.clone(), BoardSlot(slot), OnBoard, Name::new(format!("c_{}", m.name)),
+            Transform::from_xyz(x, y, 5.), m.clone(),
+            CombatStats { attack: m.attack, health: m.health },
+            BoardSlot(slot), OnBoard, Name::new(format!("c_{}", m.name)),
         ))
         .with_children(|p| {
             p.spawn((Text2d::new(format!("⚔{}", m.attack)), ff(12.), TextColor(Color::srgb(1., 0.9, 0.3)), Transform::from_xyz(-28., -50., 1.)));
@@ -341,7 +489,9 @@ fn spawn_card(commands: &mut Commands, m: &Minion, i: usize, enemy: bool, font: 
     } else {
         commands.spawn((
             Sprite { color, custom_size: Some(Vec2::new(CARD_W, CARD_H)), ..default() },
-            Transform::from_xyz(x, y, 5.), m.clone(), BoardSlot(slot), OnBoard, Name::new(format!("c_{}", m.name)),
+            Transform::from_xyz(x, y, 5.), m.clone(),
+            CombatStats { attack: m.attack, health: m.health },
+            BoardSlot(slot), OnBoard, Name::new(format!("c_{}", m.name)),
         ))
         .with_children(|p| {
             p.spawn((Text2d::new(format!("{}{}", m.race.icon(), m.name)), ff(9.), TextColor(Color::WHITE), Transform::from_xyz(0., 48., 1.)));
@@ -457,11 +607,12 @@ impl GameData {
         Self { minions, rng: StdRng::from_entropy() }
     }
 
-    fn refresh_shop(&mut self, cmds: &mut Commands, tier: i32) {
+    fn refresh_shop(&mut self, cmds: &mut Commands, tier: i32, font: &Handle<Font>) {
         let avail: Vec<&MinionTemplate> = self.minions.iter().filter(|t| t.tier <= tier).collect();
         if avail.is_empty() { return; }
         let n = avail.len().min(SHOP_SIZE);
         let idxs: Vec<usize> = rand::seq::index::sample(&mut self.rng, avail.len(), n).into_vec();
+        let ff = |s: f32| TextFont { font: font.clone(), font_size: s, ..default() };
         for (i, &idx) in idxs.iter().enumerate() {
             let t = &avail[idx];
             let m = Minion { name: t.name.clone(), attack: t.attack, health: t.health, tier: t.tier, race: t.race.clone() };
@@ -472,15 +623,15 @@ impl GameData {
             ))
             .with_children(|p| {
                 p.spawn((Text2d::new(format!("{}{}", m.race.icon(), m.name)),
-                    TextFont { font_size: 9., ..default() }, TextColor(Color::WHITE), Transform::from_xyz(0., 48., 1.)));
+                    ff(9.), TextColor(Color::WHITE), Transform::from_xyz(0., 48., 1.)));
                 p.spawn((Text2d::new(format!("⚔{}", m.attack)),
-                    TextFont { font_size: 12., ..default() }, TextColor(Color::srgb(1., 0.9, 0.3)), Transform::from_xyz(-28., -50., 1.)));
+                    ff(12.), TextColor(Color::srgb(1., 0.9, 0.3)), Transform::from_xyz(-28., -50., 1.)));
                 p.spawn((Text2d::new(format!("❤{}", m.health)),
-                    TextFont { font_size: 12., ..default() }, TextColor(Color::srgb(1., 0.25, 0.25)), Transform::from_xyz(28., -50., 1.)));
+                    ff(12.), TextColor(Color::srgb(1., 0.25, 0.25)), Transform::from_xyz(28., -50., 1.)));
                 p.spawn((Text2d::new(format!("⭐{}", m.tier)),
-                    TextFont { font_size: 9., ..default() }, TextColor(Color::srgb(1., 0.8, 0.3)), Transform::from_xyz(0., -63., 1.)));
+                    ff(9.), TextColor(Color::srgb(1., 0.8, 0.3)), Transform::from_xyz(0., -63., 1.)));
                 p.spawn((Text2d::new("💰3金"),
-                    TextFont { font_size: 9., ..default() }, TextColor(Color::srgb(0.4, 0.9, 0.3)), Transform::from_xyz(0., -76., 1.)));
+                    ff(9.), TextColor(Color::srgb(0.4, 0.9, 0.3)), Transform::from_xyz(0., -76., 1.)));
             });
         }
     }
@@ -499,13 +650,11 @@ impl GameData {
 
 fn animate_damage_texts(
     mut commands: Commands, time: Res<Time>,
-    mut q: Query<(Entity, &mut Transform, &mut Text2d, &mut DamageText)>,
+    mut q: Query<(Entity, &mut Transform, &mut DamageText)>,
 ) {
-    for (e, mut tf, mut text, mut dt) in q.iter_mut() {
+    for (e, mut tf, mut dt) in q.iter_mut() {
         dt.timer.tick(time.delta());
-        let t = dt.timer.elapsed_secs() / dt.timer.duration().as_secs_f32();
         tf.translation += (dt.velocity * time.delta_secs()).extend(0.);
-        text.0 = text.0.clone(); // keep text
         if dt.timer.just_finished() { commands.entity(e).despawn(); }
     }
 }
